@@ -593,14 +593,26 @@ See: [Backup Availability Test Results](docs/testing/backup-availability.md)
 
 ```bash
 # Build the server
-go build ./cmd/server
+go build -tags sqlite_fts5 ./cmd/server
 
 # Build and run
-go run ./cmd/server/main.go
+go run -tags sqlite_fts5 ./cmd/server/main.go
+
+# Run tests
+go test -tags sqlite_fts5 ./...
 
 # Generate protobuf code (if proto files change)
 ./scripts/gen-proto.sh
 ```
+
+### Dependencies
+
+- **[mattn/go-sqlite3](https://github.com/mattn/go-sqlite3)**: CGO-based SQLite driver. Requires a C compiler (gcc/clang) for building.
+- **[asg017/sqlite-vec](https://github.com/asg017/sqlite-vec)**: Vector search extension for SQLite (optional, for semantic search).
+
+### Build Tags
+
+- **`sqlite_fts5`**: Enables FTS5 (Full-Text Search) support in SQLite. This is **required** for full-text search functionality and must be included in all build and test commands.
 
 ## Project Structure
 
@@ -634,10 +646,13 @@ collector/
 │   │   ├── connection.go
 │   │   └── README.md
 │   │
-│   ├── db/
+│   ├── db/              # Database factory
+│   │   ├── store.go     # Factory for creating stores
+│   │   ├── README.md    # How to add new backends
 │   │   └── sqlite/      # SQLite backend
 │   │       ├── store.go
-│   │       └── backup_test.go   # 🆕 Availability tests (7 tests)
+│   │       ├── store_test.go
+│   │       └── backup_test.go   # Availability tests
 │   │
 │   ├── fs/              # 🆕 Filesystem abstraction
 │   │   └── local/       # 🆕 Local filesystem implementation
