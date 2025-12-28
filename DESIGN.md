@@ -4,7 +4,9 @@
 
 ---
 
-## 1. Foreword & Technical Goals
+# Foreword
+
+## 1. Technical Goals
 
 Collector addresses a problem I've been ruminating about over the past several years: what technical infrastructure would best allow AI agents to operate autonomously at scale? I think it needs a very particular architecture:
 
@@ -80,3 +82,29 @@ So as agents solve previously-unautomated problems, they:
 This mirrors how humans create domain-specific languages, product names, abstractions and tools, and professional jargon and vocabulary. But, agents can automate even this. The semantics stay universally legible because human-agent communication and agent-agent communication need to maintain shared semantics, just like human-human communication does already.
 
 Every namespace, type, or service given a discoverable, legible name then results in computers **more closely** matching human semantics. That's why I think Collector is a way to make computing completely semantic and **more human**, with the help of our robot friends.
+
+---
+
+# Design
+
+Contrary to the current implementation, I intend to implement Collector iteratively by building on top of very intentionally tiered abstractions:
+
+1. Collection: proto/grpc->sqlite datastructure. Handling at the fs, query layers.
+
+2. CollectionService: grpc service for Collections with CRUD, Search, other default APIs and the capacity for general grpc methods to be used on Collections' proto types via the Invoke API
+
+3. CollectionServer: grpc **server** with a system or "bootstrap" CollectionService and a default interceptor that is allowed to query and call this service to implement authn/authz. Multiple CollectionServices could be registered to the same server, possibly mediated by the boostrap/system collection and the interceptor's specific logic (if any), but there can be only one bootstrap CollectionService. 
+
+4. CollectionController: A CollectionServer where the bootstrap CollectionService and default interceptor handle namespace resolution via a namespace-interceptor that gets called before any authn/authz interceptors, which could be configured at the bootstrap (system) level and/or at the namespace level. The bootstrap collection consists of Controller CollectionServices and Namespace Collections that routing/implementing CollectionServer semantics within destination namespaces. These can be nested.
+
+5. Collector: Controllers are collections of CollectionRepos (not just generic CollectionServices), which aggregates/handles Collections within a namespace, and operates default Collections like the CollectionRegistry for proto messages and grpc methods, and Logging/Operations Collections. This makes each CollectionServer fully reflective and "production ready" with tools for backups and searching across collections themselves.
+
+6. Collector Network: Collector operates in nodes but there are root/hierarchical Collectors that serve as more authoritative sources of truth for namespaces and CollectionRegistry data, and also maintain Collector/Service registries. That allows Collector to discover information and coordinate with other Collectors across a network sharing a common root (and thus common registries and source of truth). I think this probably also requires the notion of a "Resource" to aggregate and group disparate Collector nodes.
+
+7. Collector Mesh: Collectors should be able to connect and coordinate with each other even if they don't share a common network root/source of truth. I'm not sure this is actually a different milestone from the previous one, besides resolving types/information across roots and handling conflicts, which doesn't seem that complicated compared to everything else.
+
+### Notes
+
+The current implementation doesn't properly enforce these strictly separable, layered abstractions, so it's kind of a mess. We need to be more systematic and bottoms-up.
+
+Also, I think most of the tests should be integration tests that live in a separate repo, so that LLMs are forced to implement/test/document a well-defined interface that is understandable and legible even without implementation details. **WORK IN PROGRESS**
