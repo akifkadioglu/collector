@@ -20,19 +20,19 @@ const (
 
 // CloneManager handles collection cloning operations.
 type CloneManager struct {
-	repo      CollectionRepo
-	transport Transport
-	fetcher   *Fetcher
-	dataDir   string
+	repo       CollectionRepo
+	transport  Transport
+	fetcher    *Fetcher
+	pathConfig *PathConfig
 }
 
 // NewCloneManager creates a new CloneManager.
-func NewCloneManager(repo CollectionRepo, dataDir string) *CloneManager {
+func NewCloneManager(repo CollectionRepo, pathConfig *PathConfig) *CloneManager {
 	return &CloneManager{
-		repo:      repo,
-		transport: &SqliteTransport{},
-		fetcher:   NewFetcher(),
-		dataDir:   dataDir,
+		repo:       repo,
+		transport:  &SqliteTransport{},
+		fetcher:    NewFetcher(),
+		pathConfig: pathConfig,
 	}
 }
 
@@ -54,9 +54,61 @@ func (cm *CloneManager) CloneLocal(ctx context.Context, req *pb.CloneRequest) (*
 		return nil, fmt.Errorf("failed to get source collection: %w", err)
 	}
 
+	// Check for active operations on source (read operations like clone should be allowed during backup)
+	// but should be blocked during restore/delete
+	if err := CheckOperationConflict(srcCollection.Meta); err != nil {
+		return nil, fmt.Errorf("source has active operation: %w", err)
+	}
+
+	// Check if destination exists and has active operations
+	destExists := false
+	existingDest, err := cm.repo.GetCollection(ctx, req.DestNamespace, req.DestName)
+	if err == nil {
+		destExists = true
+		// Check for operation conflicts on destination
+		if err := CheckOperationConflict(existingDest.Meta); err != nil {
+			return nil, fmt.Errorf("destination has active operation: %w", err)
+		}
+	}
+
+	// Register clone operation on source to prevent deletion during clone
+	cloneURI := fmt.Sprintf("clone:%s/%s->%s/%s",
+		srcNamespace, srcName,
+		req.DestNamespace, req.DestName)
+	if err := StartOperation(ctx, cm.repo, srcNamespace, srcName,
+		"clone", cloneURI, cm.pathConfig.DataDir, CloneTimeout); err != nil {
+		return nil, fmt.Errorf("failed to register clone operation on source: %w", err)
+	}
+
+	defer func() {
+		if err := CompleteOperation(ctx, cm.repo, srcNamespace, srcName); err != nil {
+			fmt.Printf("Warning: failed to clear clone operation state on source: %v\n", err)
+		}
+	}()
+
+	// Register clone operation on destination (if it exists)
+	if destExists {
+		if err := StartOperation(ctx, cm.repo, req.DestNamespace, req.DestName,
+			"clone", cloneURI, cm.pathConfig.DataDir, CloneTimeout); err != nil {
+			return nil, fmt.Errorf("failed to register clone operation on destination: %w", err)
+		}
+
+		defer func() {
+			if err := CompleteOperation(ctx, cm.repo, req.DestNamespace, req.DestName); err != nil {
+				fmt.Printf("Warning: failed to clear clone operation state on destination: %v\n", err)
+			}
+		}()
+	}
+
 	// Create destination paths
-	destDBPath := filepath.Join(cm.dataDir, "collections", req.DestNamespace, req.DestName+".db")
-	destFilesPath := filepath.Join(cm.dataDir, "files", req.DestNamespace, req.DestName)
+	destDBPath, err := cm.pathConfig.CollectionDBPath(req.DestNamespace, req.DestName)
+	if err != nil {
+		return nil, fmt.Errorf("invalid destination path: %w", err)
+	}
+	destFilesPath, err := cm.pathConfig.CollectionFilesPath(req.DestNamespace, req.DestName)
+	if err != nil {
+		return nil, fmt.Errorf("invalid destination files path: %w", err)
+	}
 
 	// Clone database
 	if err := cm.transport.Clone(ctx, srcCollection, destDBPath); err != nil {
@@ -139,10 +191,32 @@ func (cm *CloneManager) CloneRemote(ctx context.Context, req *pb.CloneRequest) (
 	}
 
 	// Get source collection
-	srcCollection, err := cm.repo.GetCollection(ctx, req.SourceCollection.Namespace, req.SourceCollection.Name)
+	srcNamespace := req.SourceCollection.Namespace
+	srcName := req.SourceCollection.Name
+	srcCollection, err := cm.repo.GetCollection(ctx, srcNamespace, srcName)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get source collection: %w", err)
 	}
+
+	// Check for active operations on source
+	if err := CheckOperationConflict(srcCollection.Meta); err != nil {
+		return nil, fmt.Errorf("source has active operation: %w", err)
+	}
+
+	// Register clone operation on source to prevent deletion during clone
+	cloneURI := fmt.Sprintf("clone:%s/%s->%s@%s",
+		srcNamespace, srcName,
+		req.DestNamespace, req.DestEndpoint)
+	if err := StartOperation(ctx, cm.repo, srcNamespace, srcName,
+		"clone", cloneURI, cm.pathConfig.DataDir, CloneTimeout); err != nil {
+		return nil, fmt.Errorf("failed to register clone operation on source: %w", err)
+	}
+
+	defer func() {
+		if err := CompleteOperation(ctx, cm.repo, srcNamespace, srcName); err != nil {
+			fmt.Printf("Warning: failed to clear clone operation state on source: %v\n", err)
+		}
+	}()
 
 	// Connect to remote collector
 	conn, err := grpc.NewClient(req.DestEndpoint, grpc.WithTransportCredentials(insecure.NewCredentials()))
@@ -275,7 +349,10 @@ func (cm *CloneManager) FetchRemote(ctx context.Context, req *pb.FetchRequest) (
 	}
 
 	// Create temporary file for receiving data
-	destDBPath := filepath.Join(cm.dataDir, "collections", req.DestNamespace, req.DestName+".db")
+	destDBPath, err := cm.pathConfig.CollectionDBPath(req.DestNamespace, req.DestName)
+	if err != nil {
+		return nil, fmt.Errorf("invalid destination path: %w", err)
+	}
 	if err := os.MkdirAll(filepath.Dir(destDBPath), 0755); err != nil {
 		return nil, fmt.Errorf("failed to create destination directory: %w", err)
 	}
@@ -381,8 +458,42 @@ func (cm *CloneManager) ReceivePushedCollection(stream pb.CollectionRepo_PushCol
 		return fmt.Errorf("expected metadata in first message")
 	}
 
+	// Check if destination exists and has active operations
+	destExists := false
+	existingDest, err := cm.repo.GetCollection(ctx, metadata.DestNamespace, metadata.DestName)
+	if err == nil {
+		destExists = true
+		// Check for operation conflicts on destination
+		if err := CheckOperationConflict(existingDest.Meta); err != nil {
+			return fmt.Errorf("destination has active operation: %w", err)
+		}
+	}
+
+	// Register clone operation on destination (if it exists)
+	if destExists {
+		cloneURI := fmt.Sprintf("clone:remote->%s/%s", metadata.DestNamespace, metadata.DestName)
+		if metadata.SourceCollection != nil {
+			cloneURI = fmt.Sprintf("clone:%s/%s->%s/%s",
+				metadata.SourceCollection.Namespace, metadata.SourceCollection.Name,
+				metadata.DestNamespace, metadata.DestName)
+		}
+		if err := StartOperation(ctx, cm.repo, metadata.DestNamespace, metadata.DestName,
+			"clone", cloneURI, cm.pathConfig.DataDir, CloneTimeout); err != nil {
+			return fmt.Errorf("failed to register clone operation: %w", err)
+		}
+
+		defer func() {
+			if err := CompleteOperation(ctx, cm.repo, metadata.DestNamespace, metadata.DestName); err != nil {
+				fmt.Printf("Warning: failed to clear clone operation state: %v\n", err)
+			}
+		}()
+	}
+
 	// Create destination paths
-	destDBPath := filepath.Join(cm.dataDir, "collections", metadata.DestNamespace, metadata.DestName+".db")
+	destDBPath, err := cm.pathConfig.CollectionDBPath(metadata.DestNamespace, metadata.DestName)
+	if err != nil {
+		return fmt.Errorf("invalid destination path: %w", err)
+	}
 	if err := os.MkdirAll(filepath.Dir(destDBPath), 0755); err != nil {
 		return fmt.Errorf("failed to create destination directory: %w", err)
 	}
@@ -476,10 +587,30 @@ func (cm *CloneManager) StreamCollectionToPuller(req *pb.PullCollectionRequest, 
 	ctx := stream.Context()
 
 	// Get source collection
-	srcCollection, err := cm.repo.GetCollection(ctx, req.SourceCollection.Namespace, req.SourceCollection.Name)
+	srcNamespace := req.SourceCollection.Namespace
+	srcName := req.SourceCollection.Name
+	srcCollection, err := cm.repo.GetCollection(ctx, srcNamespace, srcName)
 	if err != nil {
 		return fmt.Errorf("failed to get source collection: %w", err)
 	}
+
+	// Check for active operations on source
+	if err := CheckOperationConflict(srcCollection.Meta); err != nil {
+		return fmt.Errorf("source has active operation: %w", err)
+	}
+
+	// Register clone/pull operation on source to prevent deletion during streaming
+	pullURI := fmt.Sprintf("pull:%s/%s", srcNamespace, srcName)
+	if err := StartOperation(ctx, cm.repo, srcNamespace, srcName,
+		"clone", pullURI, cm.pathConfig.DataDir, CloneTimeout); err != nil {
+		return fmt.Errorf("failed to register pull operation on source: %w", err)
+	}
+
+	defer func() {
+		if err := CompleteOperation(ctx, cm.repo, srcNamespace, srcName); err != nil {
+			fmt.Printf("Warning: failed to clear pull operation state on source: %v\n", err)
+		}
+	}()
 
 	// Count records
 	records, err := srcCollection.Store.ListRecords(ctx, 999999, 0)

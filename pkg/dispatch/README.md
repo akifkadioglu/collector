@@ -48,9 +48,9 @@ Creates a bidirectional connection between two collectors.
 **Request:**
 ```protobuf
 message ConnectRequest {
-  string collector_id = 1;        // ID of collector initiating connection
-  string address = 2;             // gRPC address of initiating collector
-  repeated string namespaces = 3; // Namespaces supported by initiator
+  string address = 1;                    // gRPC address of initiating collector
+  repeated string namespaces = 2;        // Namespaces supported by initiator
+  map<string, string> metadata = 3;      // Optional metadata (e.g., "collector_id")
 }
 ```
 
@@ -375,7 +375,7 @@ func main() {
     // Client Makes Request
     // ============================================================
 
-    conn, _ := grpc.Dial("localhost:50051", grpc.WithInsecure())
+    conn, _ := grpc.NewClient("localhost:50051", grpc.WithTransportCredentials(insecure.NewCredentials()))
     client := pb.NewCollectiveDispatcherClient(conn)
 
     // Request to "users" namespace - executes on Collector 1 (local)
@@ -517,3 +517,25 @@ All service handlers must match this signature. Input and output can be any type
 - Connection health checks and auto-reconnection
 - Dynamic namespace updates
 - Service mesh integration (Istio, Linkerd)
+
+## Connection Persistence & Recovery
+
+Connections are automatically persisted to the `system/connections` collection.
+
+### Recovery from Restart
+When a Collector restarts, it can restore its previous mesh topology:
+
+```go
+// In main startup:
+if err := dispatcher.GetConnectionManager().RecoverFromRestart(ctx); err != nil {
+    log.Warn("Failed to recover connections", "error", err)
+}
+```
+
+This operation:
+1.  Scans the `system/connections` collection for active connections from the previous session.
+2.  Marks them as `STALE` (since the TCP connection is lost).
+3.  (Future) Could automatically attempt reconnection.
+
+This ensures the `system/connections` collection remains an accurate historical record of the mesh topology, even after crashes.
+

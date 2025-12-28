@@ -180,17 +180,44 @@ dispatcher := dispatch.NewDispatcherWithRegistry(collectorID, addr, namespaces, 
 import (
     "github.com/accretional/collector/pkg/registry"
     "github.com/accretional/collector/pkg/collection"
+    "github.com/accretional/collector/pkg/db"
 )
 
 // Create collections to store registered protos and services
+protosStore, _ := db.NewStore(ctx, db.Config{
+    Type:       db.DBTypeSQLite,
+    SQLitePath: "./data/protos.db",
+    Options:    collection.Options{EnableJSON: true},
+})
+
 registeredProtos, _ := collection.NewCollection(
-    &pb.Collection{Namespace: "system", Name: "registered_protos"},
+    &pb.Collection{
+        Namespace: "system",
+        Name:      "registered_protos",
+        MessageType: &pb.MessageTypeRef{
+            Namespace:   "collector",
+            MessageName: "RegisteredProto",
+        },
+    },
     protosStore,
     &collection.LocalFileSystem{},
 )
 
+servicesStore, _ := db.NewStore(ctx, db.Config{
+    Type:       db.DBTypeSQLite,
+    SQLitePath: "./data/services.db",
+    Options:    collection.Options{EnableJSON: true},
+})
+
 registeredServices, _ := collection.NewCollection(
-    &pb.Collection{Namespace: "system", Name: "registered_services"},
+    &pb.Collection{
+        Namespace: "system",
+        Name:      "registered_services",
+        MessageType: &pb.MessageTypeRef{
+            Namespace:   "collector",
+            MessageName: "RegisteredService",
+        },
+    },
     servicesStore,
     &collection.LocalFileSystem{},
 )
@@ -374,8 +401,10 @@ package main
 import (
     "context"
     "net"
+    "time"
 
     "github.com/accretional/collector/pkg/collection"
+    "github.com/accretional/collector/pkg/db"
     "github.com/accretional/collector/pkg/dispatch"
     "github.com/accretional/collector/pkg/registry"
     pb "github.com/accretional/collector/gen/collector"
@@ -392,24 +421,38 @@ func main() {
     // ================================================================
 
     protosStore, _ := db.NewStore(ctx, db.Config{
-		Type:       db.DBTypeSQLite,
+        Type:       db.DBTypeSQLite,
         SQLitePath: "./data/protos.db",
         Options:    collection.Options{EnableJSON: true},
     })
     servicesStore, _ := db.NewStore(ctx, db.Config{
-		Type:       db.DBTypeSQLite,
+        Type:       db.DBTypeSQLite,
         SQLitePath: "./data/services.db",
         Options:    collection.Options{EnableJSON: true},
     })
 
     registeredProtos, _ := collection.NewCollection(
-        &pb.Collection{Namespace: "system", Name: "registered_protos"},
+        &pb.Collection{
+            Namespace: "system",
+            Name:      "registered_protos",
+            MessageType: &pb.MessageTypeRef{
+                Namespace:   "collector",
+                MessageName: "RegisteredProto",
+            },
+        },
         protosStore,
         &collection.LocalFileSystem{},
     )
 
     registeredServices, _ := collection.NewCollection(
-        &pb.Collection{Namespace: "system", Name: "registered_services"},
+        &pb.Collection{
+            Namespace: "system",
+            Name:      "registered_services",
+            MessageType: &pb.MessageTypeRef{
+                Namespace:   "collector",
+                MessageName: "RegisteredService",
+            },
+        },
         servicesStore,
         &collection.LocalFileSystem{},
     )
@@ -518,6 +561,11 @@ func (v *grpcRegistryClientValidator) ValidateServiceMethod(
 ```go
 // LookupProto retrieves a registered proto by namespace and file name
 proto, err := registryServer.LookupProto(ctx, "production", "collection.proto")
+
+// LookupProtoByMessageName finds a proto containing a specific message type
+// This is used for JSON conversion - looking up FileDescriptor by message name
+proto, err := registryServer.LookupProtoByMessageName(ctx, "production", "User")
+// Returns the RegisteredProto containing "User" message
 
 // LookupService retrieves a registered service
 service, err := registryServer.LookupService(ctx, "production", "CollectionService")

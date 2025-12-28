@@ -4,12 +4,20 @@ import (
 	"context"
 	"fmt"
 	"sync"
+	"time"
 
 	pb "github.com/accretional/collector/gen/collector"
+	"github.com/accretional/collector/pkg/collection"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	"google.golang.org/protobuf/types/known/anypb"
 )
+
+// generateSessionID creates a unique session ID for this dispatcher instance.
+// Format: {collectorID}_{timestamp_nano}
+func generateSessionID(collectorID string) string {
+	return fmt.Sprintf("%s_%d", collectorID, time.Now().UnixNano())
+}
 
 // ServiceHandler is a function that handles a service method invocation
 type ServiceHandler func(ctx context.Context, input interface{}) (interface{}, error)
@@ -30,21 +38,24 @@ type Dispatcher struct {
 	servicesMutex sync.RWMutex
 
 	// Optional registry validator for checking if services are registered
-	registryValidator RegistryValidator
+	registryValidator      RegistryValidator
+	registryValidatorMutex sync.RWMutex
 }
 
 // NewDispatcher creates a new dispatcher instance
 func NewDispatcher(collectorID, address string, namespaces []string) *Dispatcher {
+	sessionID := generateSessionID(collectorID)
 	return &Dispatcher{
-		connManager: NewConnectionManager(collectorID, address, namespaces),
+		connManager: NewConnectionManager(collectorID, address, namespaces, sessionID, nil),
 		services:    make(map[string]map[string]ServiceHandler),
 	}
 }
 
 // NewDispatcherWithRegistry creates a new dispatcher instance with registry validation
-func NewDispatcherWithRegistry(collectorID, address string, namespaces []string, validator RegistryValidator) *Dispatcher {
+func NewDispatcherWithRegistry(collectorID, address string, namespaces []string, validator RegistryValidator, coll *collection.Collection) *Dispatcher {
+	sessionID := generateSessionID(collectorID)
 	return &Dispatcher{
-		connManager:       NewConnectionManager(collectorID, address, namespaces),
+		connManager:       NewConnectionManager(collectorID, address, namespaces, sessionID, coll),
 		services:          make(map[string]map[string]ServiceHandler),
 		registryValidator: validator,
 	}
@@ -52,6 +63,8 @@ func NewDispatcherWithRegistry(collectorID, address string, namespaces []string,
 
 // SetRegistryValidator sets the registry validator for this dispatcher
 func (d *Dispatcher) SetRegistryValidator(validator RegistryValidator) {
+	d.registryValidatorMutex.Lock()
+	defer d.registryValidatorMutex.Unlock()
 	d.registryValidator = validator
 }
 
@@ -82,8 +95,11 @@ func (d *Dispatcher) Serve(ctx context.Context, req *pb.ServeRequest) (*pb.Serve
 	}
 
 	// Validate against registry if validator is configured
-	if d.registryValidator != nil {
-		if err := d.registryValidator.ValidateServiceMethod(ctx, req.Namespace, req.Service.ServiceName, req.MethodName); err != nil {
+	d.registryValidatorMutex.RLock()
+	validator := d.registryValidator
+	d.registryValidatorMutex.RUnlock()
+	if validator != nil {
+		if err := validator.ValidateServiceMethod(ctx, req.Namespace, req.Service.ServiceName, req.MethodName); err != nil {
 			return &pb.ServeResponse{
 				Status: &pb.Status{
 					Code:    404,

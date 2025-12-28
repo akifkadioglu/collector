@@ -105,24 +105,36 @@ func TestUpdateRecord_RollbackOnFailure(t *testing.T) {
 		t.Error("original data not correct")
 	}
 
-	// Try to update with invalid data
+	// Try to update with data that exceeds the size limit
+	// This should fail and preserve the original data
+	oversizedData := make([]byte, collection.MaxProtoSize+1)
+	for i := range oversizedData {
+		oversizedData[i] = 'x'
+	}
 	invalid := &pb.CollectionRecord{
 		Id:        "rollback-test",
-		ProtoData: []byte{0xFF, 0xFE}, // Invalid UTF-8
+		ProtoData: oversizedData,
 	}
 
-	_ = coll.UpdateRecord(ctx, invalid)
+	err := coll.UpdateRecord(ctx, invalid)
+	if err == nil {
+		t.Fatal("expected update to fail due to size limit")
+	}
 
-	// Original data should still be retrievable
-	retrieved, err := coll.GetRecord(ctx, "rollback-test")
+	// Original data should still be retrievable and unchanged
+	retrieved, err = coll.GetRecord(ctx, "rollback-test")
 	if err != nil {
 		t.Fatalf("failed to get record after failed update: %v", err)
 	}
 
-	// If the update failed, original should be preserved
+	// Original should be preserved since the update failed
 	var data map[string]interface{}
 	if err := json.Unmarshal(retrieved.ProtoData, &data); err != nil {
 		t.Error("data should still be valid JSON")
+	}
+
+	if data["version"] != float64(1) {
+		t.Errorf("expected version 1, got %v", data["version"])
 	}
 }
 
@@ -591,6 +603,41 @@ func TestVeryLargeRecord(t *testing.T) {
 
 	if !bytes.Equal(retrieved.ProtoData, largeData) {
 		t.Error("large data was corrupted")
+	}
+}
+
+func TestUpdateRecord_BinaryData(t *testing.T) {
+	coll, cleanup := setupTestCollection(t)
+	defer cleanup()
+	ctx := context.Background()
+
+	// 1. Create binary record
+	binaryV1 := []byte{0x01, 0x02, 0x03}
+	record := &pb.CollectionRecord{
+		Id:        "binary-update",
+		ProtoData: binaryV1,
+	}
+	if err := coll.CreateRecord(ctx, record); err != nil {
+		t.Fatalf("create failed: %v", err)
+	}
+
+	// 2. Update with new binary data
+	binaryV2 := []byte{0x04, 0x05, 0x06, 0x07}
+	update := &pb.CollectionRecord{
+		Id:        "binary-update",
+		ProtoData: binaryV2,
+	}
+	if err := coll.UpdateRecord(ctx, update); err != nil {
+		t.Fatalf("update failed: %v", err)
+	}
+
+	// 3. Verify
+	retrieved, err := coll.GetRecord(ctx, "binary-update")
+	if err != nil {
+		t.Fatalf("get failed: %v", err)
+	}
+	if !bytes.Equal(retrieved.ProtoData, binaryV2) {
+		t.Errorf("expected %v, got %v", binaryV2, retrieved.ProtoData)
 	}
 }
 

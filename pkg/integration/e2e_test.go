@@ -3,6 +3,7 @@ package integration
 import (
 	"context"
 	"net"
+	"os"
 	"path/filepath"
 	"testing"
 	"time"
@@ -10,6 +11,7 @@ import (
 	pb "github.com/accretional/collector/gen/collector"
 	"github.com/accretional/collector/pkg/collection"
 	"github.com/accretional/collector/pkg/db"
+	"github.com/accretional/collector/pkg/db/sqlite"
 	"github.com/accretional/collector/pkg/dispatch"
 	"github.com/accretional/collector/pkg/registry"
 	"google.golang.org/grpc"
@@ -42,7 +44,14 @@ func TestEndToEndIntegration(t *testing.T) {
 	defer protosStore.Close()
 
 	registeredProtos, err := collection.NewCollection(
-		&pb.Collection{Namespace: "system", Name: "registered_protos"},
+		&pb.Collection{
+			Namespace: "system",
+			Name:      "registered_protos",
+			MessageType: &pb.MessageTypeRef{
+				Namespace:   "collector",
+				MessageName: "RegisteredProto",
+			},
+		},
 		protosStore,
 		&collection.LocalFileSystem{},
 	)
@@ -61,7 +70,14 @@ func TestEndToEndIntegration(t *testing.T) {
 	defer servicesStore.Close()
 
 	registeredServices, err := collection.NewCollection(
-		&pb.Collection{Namespace: "system", Name: "registered_services"},
+		&pb.Collection{
+			Namespace: "system",
+			Name:      "registered_services",
+			MessageType: &pb.MessageTypeRef{
+				Namespace:   "collector",
+				MessageName: "RegisteredService",
+			},
+		},
 		servicesStore,
 		&collection.LocalFileSystem{},
 	)
@@ -77,17 +93,39 @@ func TestEndToEndIntegration(t *testing.T) {
 	// 2. Setup CollectionRepo
 	// ========================================================================
 
-	repoStore, err := db.NewStore(ctx, db.Config{
-		Type:       db.DBTypeSQLite,
-		SQLitePath: filepath.Join(tempDir, "repo.db"),
-		Options:    collection.Options{EnableJSON: true},
-	})
+	// Create PathConfig for collection management
+	pathConfig := collection.NewPathConfig(tempDir)
+
+	// Create registry store using CollectionRegistryStore (same as production)
+	registryPath := filepath.Join(tempDir, "system", "collections.db")
+	if err := os.MkdirAll(filepath.Dir(registryPath), 0755); err != nil {
+		t.Fatalf("failed to create registry dir: %v", err)
+	}
+
+	registryDBStore, err := sqlite.NewStore(registryPath, collection.Options{EnableJSON: true})
+	if err != nil {
+		t.Fatalf("failed to create registry db store: %v", err)
+	}
+	defer registryDBStore.Close()
+
+	registryStore, err := collection.NewCollectionRegistryStoreFromStore(registryDBStore, &collection.LocalFileSystem{})
+	if err != nil {
+		t.Fatalf("failed to create registry store: %v", err)
+	}
+	defer registryStore.Close()
+
+	// Create dummy store (not used for metadata)
+	repoStore, err := sqlite.NewStore(":memory:", collection.Options{})
 	if err != nil {
 		t.Fatalf("failed to create repo store: %v", err)
 	}
 	defer repoStore.Close()
 
-	collectionRepo := collection.NewCollectionRepo(repoStore)
+	// Create store factory
+	storeFactory := func(path string, opts collection.Options) (collection.Store, error) {
+		return sqlite.NewStore(path, opts)
+	}
+	collectionRepo := collection.NewCollectionRepo(repoStore, pathConfig, registryStore, storeFactory)
 
 	// ========================================================================
 	// 3. Setup Dispatcher with Registry
@@ -99,6 +137,7 @@ func TestEndToEndIntegration(t *testing.T) {
 		"localhost:0",
 		[]string{namespace},
 		validator,
+		nil,
 	)
 
 	t.Log("✓ Dispatcher created with registry validation")
@@ -144,7 +183,7 @@ func TestEndToEndIntegration(t *testing.T) {
 	t.Logf("✓ Dispatcher started on %s", dispatcherLis.Addr())
 
 	// Start CollectionRepo
-	repoGrpcServer := collection.NewGrpcServer(collectionRepo)
+	repoGrpcServer := collection.NewGrpcServer(collectionRepo, pathConfig)
 	repoGrpcServerWrapped, repoLis, err := registry.SetupCollectionRepoWithValidation(
 		ctx,
 		registryServer,

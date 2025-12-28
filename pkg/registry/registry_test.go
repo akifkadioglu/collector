@@ -15,12 +15,34 @@ import (
 )
 
 func setupTestServer(t *testing.T) (*RegistryServer, *collection.Collection, *collection.Collection) {
-	registeredProtos, err := collection.NewCollection(&collector.Collection{Namespace: "system", Name: "registered_protos"}, newTempStore(t), &collection.LocalFileSystem{})
+	registeredProtos, err := collection.NewCollection(
+		&collector.Collection{
+			Namespace: "system",
+			Name:      "registered_protos",
+			MessageType: &collector.MessageTypeRef{
+				Namespace:   "collector",
+				MessageName: "RegisteredProto",
+			},
+		},
+		newTempStore(t),
+		&collection.LocalFileSystem{},
+	)
 	if err != nil {
 		t.Fatalf("failed to create registered protos collection: %v", err)
 	}
 
-	registeredServices, err := collection.NewCollection(&collector.Collection{Namespace: "system", Name: "registered_services"}, newTempStore(t), &collection.LocalFileSystem{})
+	registeredServices, err := collection.NewCollection(
+		&collector.Collection{
+			Namespace: "system",
+			Name:      "registered_services",
+			MessageType: &collector.MessageTypeRef{
+				Namespace:   "collector",
+				MessageName: "RegisteredService",
+			},
+		},
+		newTempStore(t),
+		&collection.LocalFileSystem{},
+	)
 	if err != nil {
 		t.Fatalf("failed to create registered services collection: %v", err)
 	}
@@ -377,6 +399,24 @@ func TestRegisterService_MultipleNamespaces(t *testing.T) {
 func TestRegisterProto_WithDependencies(t *testing.T) {
 	server, registeredProtos, _ := setupTestServer(t)
 
+	// First register the dependency
+	commonReq := &collector.RegisterProtoRequest{
+		Namespace: "test",
+		FileDescriptor: &descriptorpb.FileDescriptorProto{
+			Name: proto.String("common.proto"),
+			MessageType: []*descriptorpb.DescriptorProto{
+				{
+					Name: proto.String("CommonMessage"),
+				},
+			},
+		},
+	}
+	_, err := server.RegisterProto(context.Background(), commonReq)
+	if err != nil {
+		t.Fatalf("RegisterProto for common.proto failed: %v", err)
+	}
+
+	// Now register the dependent proto
 	req := &collector.RegisterProtoRequest{
 		Namespace: "test",
 		FileDescriptor: &descriptorpb.FileDescriptorProto{

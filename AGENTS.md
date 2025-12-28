@@ -2,6 +2,38 @@
 
 This document provides critical guidelines for AI agents (like Claude, GPT, etc.) working on the Collector codebase.
 
+## Development Environment Setup
+
+### Go Installation
+
+This project requires the Go version specified in `go.mod` (currently **Go 1.25**).
+
+**Installing/Upgrading Go:**
+
+```bash
+# Check required version in go.mod
+head -3 go.mod
+
+# Download and install Go from official source (example for 1.25)
+cd /tmp
+wget https://go.dev/dl/go1.25.linux-amd64.tar.gz
+sudo rm -rf /usr/local/go
+sudo tar -C /usr/local -xzf go1.25.linux-amd64.tar.gz
+rm go1.25.linux-amd64.tar.gz
+
+# Verify installation
+/usr/local/go/bin/go version
+```
+
+**Note:** Go versions are available at `https://go.dev/dl/go{VERSION}.linux-amd64.tar.gz`
+
+Replace `{VERSION}` with the version from go.mod (e.g., `1.25`, `1.24.11`, etc.)
+
+**Update PATH:**
+```bash
+export PATH=/usr/local/go/bin:$PATH
+```
+
 ## ⚠️ CRITICAL: Test Requirements
 
 ### You MUST Run All Tests Before Claiming Completion

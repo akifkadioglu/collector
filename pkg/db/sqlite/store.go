@@ -20,12 +20,13 @@ import (
 )
 
 type Store struct {
-	db           *sql.DB
-	path         string
-	options      collection.Options
-	embedder     collection.Embedder
-	ftsAvailable bool
-	mu           sync.RWMutex
+	db            *sql.DB
+	path          string
+	options       collection.Options
+	embedder      collection.Embedder
+	ftsAvailable  bool
+	mu            sync.RWMutex
+	jsonConverter collection.ProtoToJSONConverter // Converts binary proto to JSON for jsontext column
 }
 
 type execContext interface {
@@ -66,8 +67,15 @@ func NewStore(path string, opts collection.Options) (*Store, error) {
 		return nil, fmt.Errorf("default schema failed: %w", err)
 	}
 
-	if _, err := db.Exec(collection.JSONSchema); err != nil {
-		log.Println("JSONSchema already exists")
+	if opts.EnableJSON {
+		if _, err := db.Exec(collection.JSONSchema); err != nil {
+			// Ignore "duplicate column" errors (column already exists from previous init)
+			if !strings.Contains(err.Error(), "duplicate column") {
+				db.Close()
+				return nil, fmt.Errorf("JSON schema failed: %w", err)
+			}
+			log.Println("JSONSchema already exists")
+		}
 	}
 
 	if opts.EnableVector {
@@ -152,11 +160,24 @@ func (s *Store) Close() error {
 }
 func (s *Store) Path() string { return s.path }
 
+// SetJSONConverter sets the function used to convert binary proto_data to JSON for the jsontext column.
+// This must be called before CreateRecord/UpdateRecord if EnableJSON is true and proto_data contains binary protobuf.
+func (s *Store) SetJSONConverter(conv collection.ProtoToJSONConverter) {
+	s.jsonConverter = conv
+}
+
 func (s *Store) CreateRecord(ctx context.Context, r *pb.CollectionRecord) error {
 	labelsJSON, _ := json.Marshal(r.Metadata.Labels)
 
+	// Determine JSON representation for the jsontext column
 	var jsonText string
-	if json.Valid(r.ProtoData) {
+	if s.jsonConverter != nil {
+		converted, err := s.jsonConverter(r.ProtoData)
+		if err != nil {
+			return fmt.Errorf("convert proto to JSON: %w", err)
+		}
+		jsonText = converted
+	} else if json.Valid(r.ProtoData) {
 		jsonText = string(r.ProtoData)
 	} else {
 		jsonText = "{}"
@@ -179,31 +200,34 @@ func (s *Store) CreateRecord(ctx context.Context, r *pb.CollectionRecord) error 
 
 	var query string
 	var args []interface{}
-	if s.options.EnableVector {
+
+	// Build INSERT statement based on enabled features
+	baseArgs := []interface{}{
+		r.Id,
+		r.ProtoData,
+		r.DataUri,
+		r.Metadata.CreatedAt.Seconds,
+		r.Metadata.UpdatedAt.Seconds,
+		string(labelsJSON),
+	}
+
+	switch {
+	case s.options.EnableVector && s.options.EnableJSON:
 		query = `INSERT INTO records (id, proto_data, data_uri, created_at, updated_at, labels, jsontext, vector)
                  VALUES (?, ?, ?, ?, ?, ?, ?, ?)`
-		args = []interface{}{
-			r.Id,
-			r.ProtoData,
-			r.DataUri,
-			r.Metadata.CreatedAt.Seconds,
-			r.Metadata.UpdatedAt.Seconds,
-			string(labelsJSON),
-			jsonText,
-			vectorBlob,
-		}
-	} else {
+		args = append(baseArgs, jsonText, vectorBlob)
+	case s.options.EnableVector:
+		query = `INSERT INTO records (id, proto_data, data_uri, created_at, updated_at, labels, vector)
+                 VALUES (?, ?, ?, ?, ?, ?, ?)`
+		args = append(baseArgs, vectorBlob)
+	case s.options.EnableJSON:
 		query = `INSERT INTO records (id, proto_data, data_uri, created_at, updated_at, labels, jsontext)
                  VALUES (?, ?, ?, ?, ?, ?, ?)`
-		args = []interface{}{
-			r.Id,
-			r.ProtoData,
-			r.DataUri,
-			r.Metadata.CreatedAt.Seconds,
-			r.Metadata.UpdatedAt.Seconds,
-			string(labelsJSON),
-			jsonText,
-		}
+		args = append(baseArgs, jsonText)
+	default:
+		query = `INSERT INTO records (id, proto_data, data_uri, created_at, updated_at, labels)
+                 VALUES (?, ?, ?, ?, ?, ?)`
+		args = baseArgs
 	}
 
 	if _, err := tx.ExecContext(ctx, query, args...); err != nil {
@@ -259,11 +283,18 @@ func (s *Store) GetRecord(ctx context.Context, id string) (*pb.CollectionRecord,
 func (s *Store) UpdateRecord(ctx context.Context, r *pb.CollectionRecord) error {
 	labelsJSON, _ := json.Marshal(r.Metadata.Labels)
 
+	// Determine JSON representation for the jsontext column
 	var jsonText string
-	if json.Valid(r.ProtoData) {
+	if s.jsonConverter != nil {
+		converted, err := s.jsonConverter(r.ProtoData)
+		if err != nil {
+			return fmt.Errorf("convert proto to JSON: %w", err)
+		}
+		jsonText = converted
+	} else if json.Valid(r.ProtoData) {
 		jsonText = string(r.ProtoData)
 	} else {
-		return fmt.Errorf("invalid JSON")
+		jsonText = "{}"
 	}
 
 	var vectorBlob interface{}
@@ -283,25 +314,21 @@ func (s *Store) UpdateRecord(ctx context.Context, r *pb.CollectionRecord) error 
 
 	var query string
 	var args []interface{}
-	if s.options.EnableVector {
+
+	// Build UPDATE statement based on enabled features
+	switch {
+	case s.options.EnableVector && s.options.EnableJSON:
 		query = `UPDATE records SET proto_data=?, updated_at=?, labels=?, jsontext=?, vector=? WHERE id=?`
-		args = []interface{}{
-			r.ProtoData,
-			r.Metadata.UpdatedAt.Seconds,
-			string(labelsJSON),
-			jsonText,
-			vectorBlob,
-			r.Id,
-		}
-	} else {
+		args = []interface{}{r.ProtoData, r.Metadata.UpdatedAt.Seconds, string(labelsJSON), jsonText, vectorBlob, r.Id}
+	case s.options.EnableVector:
+		query = `UPDATE records SET proto_data=?, updated_at=?, labels=?, vector=? WHERE id=?`
+		args = []interface{}{r.ProtoData, r.Metadata.UpdatedAt.Seconds, string(labelsJSON), vectorBlob, r.Id}
+	case s.options.EnableJSON:
 		query = `UPDATE records SET proto_data=?, updated_at=?, labels=?, jsontext=? WHERE id=?`
-		args = []interface{}{
-			r.ProtoData,
-			r.Metadata.UpdatedAt.Seconds,
-			string(labelsJSON),
-			jsonText,
-			r.Id,
-		}
+		args = []interface{}{r.ProtoData, r.Metadata.UpdatedAt.Seconds, string(labelsJSON), jsonText, r.Id}
+	default:
+		query = `UPDATE records SET proto_data=?, updated_at=?, labels=? WHERE id=?`
+		args = []interface{}{r.ProtoData, r.Metadata.UpdatedAt.Seconds, string(labelsJSON), r.Id}
 	}
 
 	res, err := tx.ExecContext(ctx, query, args...)
@@ -309,7 +336,10 @@ func (s *Store) UpdateRecord(ctx context.Context, r *pb.CollectionRecord) error 
 		return err
 	}
 
-	rows, _ := res.RowsAffected()
+	rows, err := res.RowsAffected()
+	if err != nil {
+		return fmt.Errorf("get rows affected: %w", err)
+	}
 	if rows == 0 {
 		return fmt.Errorf("record not found")
 	}
@@ -372,7 +402,9 @@ func (s *Store) ListRecords(ctx context.Context, offset, limit int) ([]*pb.Colle
 			lJSON            string
 		)
 
-		rows.Scan(&r.Id, &r.ProtoData, &dUri, &created, &updated, &lJSON)
+		if err := rows.Scan(&r.Id, &r.ProtoData, &dUri, &created, &updated, &lJSON); err != nil {
+			return nil, fmt.Errorf("scan record: %w", err)
+		}
 
 		r.Metadata = &pb.Metadata{
 			CreatedAt: &timestamppb.Timestamp{Seconds: created},
@@ -382,10 +414,15 @@ func (s *Store) ListRecords(ctx context.Context, offset, limit int) ([]*pb.Colle
 			r.DataUri = dUri.String
 		}
 		if lJSON != "" {
-			json.Unmarshal([]byte(lJSON), &r.Metadata.Labels)
+			if err := json.Unmarshal([]byte(lJSON), &r.Metadata.Labels); err != nil {
+				r.Metadata.Labels = map[string]string{"_parse_error": err.Error()}
+			}
 		}
 
 		items = append(items, &r)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("iterate records: %w", err)
 	}
 	return items, nil
 }
@@ -417,7 +454,10 @@ func (s *Store) Backup(ctx context.Context, destPath string) error {
 		// Non-fatal, continue anyway
 	}
 
-	query := fmt.Sprintf("VACUUM INTO '%s'", destPath)
+	// Use VACUUM INTO for the backup - this creates a consistent snapshot
+	// Escape single quotes in path to prevent SQL injection
+	escapedPath := strings.ReplaceAll(destPath, "'", "''")
+	query := fmt.Sprintf("VACUUM INTO '%s'", escapedPath)
 	if err := s.ExecuteRaw(query); err != nil {
 		return fmt.Errorf("backup failed: %w", err)
 	}
@@ -436,8 +476,11 @@ func (s *Store) BackupOnline(ctx context.Context, destPath string, pagesBatchSiz
 		pagesBatchSize = 100 // Default: copy 100 pages at a time
 	}
 
+	// Escape single quotes in path to prevent SQL injection
+	escapedPath := strings.ReplaceAll(destPath, "'", "''")
+
 	// Attach the destination database (creates file if it doesn't exist)
-	attachQuery := fmt.Sprintf("ATTACH DATABASE '%s' AS backup", destPath)
+	attachQuery := fmt.Sprintf("ATTACH DATABASE '%s' AS backup", escapedPath)
 	if _, err := s.db.ExecContext(ctx, attachQuery); err != nil {
 		return fmt.Errorf("failed to attach backup db: %w", err)
 	}
@@ -512,6 +555,12 @@ func (s *Store) BackupOnline(ctx context.Context, destPath string, pagesBatchSiz
 }
 
 func (s *Store) Search(ctx context.Context, q *collection.SearchQuery) ([]*collection.SearchResult, error) {
+	// Validate EnableJSON is set when using JSON features
+	hasJSONFilters := len(q.Filters) > 0 || len(q.LabelFilters) > 0
+	if hasJSONFilters && !s.options.EnableJSON {
+		return nil, fmt.Errorf("search with Filters or LabelFilters requires EnableJSON to be true")
+	}
+
 	hasVector := len(q.Vector) > 0 && s.options.EnableVector
 	hasFTS := q.FullText != "" && s.ftsAvailable
 
@@ -719,7 +768,8 @@ func (s *Store) buildJSONFilters(filters map[string]collection.Filter) ([]string
 	var clauses []string
 	var args []interface{}
 	for key, filter := range filters {
-		path := `$.` + key
+		// For JSON filters, dots are path separators (nested field access)
+		path := "$." + key
 		switch filter.Operator {
 		case collection.OpExists:
 			clauses = append(clauses, `json_extract(r.jsontext, ?) IS NOT NULL`)
@@ -742,10 +792,26 @@ func (s *Store) buildLabelFilters(labelFilters map[string]string) ([]string, []i
 	var clauses []string
 	var args []interface{}
 	for key, value := range labelFilters {
-		clauses = append(clauses, fmt.Sprintf(`json_extract(r.labels, '$.%s') = ?`, key))
+		// Escape the key for JSON path - use double quotes for keys with special chars
+		escapedKey := escapeJSONPathKey(key)
+		clauses = append(clauses, fmt.Sprintf(`json_extract(r.labels, '%s') = ?`, escapedKey))
 		args = append(args, value)
 	}
 	return clauses, args
+}
+
+// escapeJSONPathKey escapes a key for use in SQLite JSON path expressions.
+// Keys with dots, brackets, quotes, or other special characters need to be
+// quoted using the $."key" syntax.
+func escapeJSONPathKey(key string) string {
+	// If key contains special characters, use quoted syntax
+	needsQuoting := strings.ContainsAny(key, `.[]"'`)
+	if needsQuoting {
+		// Escape double quotes within the key and wrap in $."..."
+		escaped := strings.ReplaceAll(key, `"`, `\"`)
+		return fmt.Sprintf(`$."%s"`, escaped)
+	}
+	return "$." + key
 }
 
 func (s *Store) executeSearchQuery(ctx context.Context, query string, args []interface{},

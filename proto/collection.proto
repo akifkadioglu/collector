@@ -28,13 +28,31 @@ message CollectionDir {
 }
 
 // A record in the Collection table (the "inode")
-// Only serialized proto bytes here, derive JSON as needed.
-// Note that table records do have a json_data field
+// proto_data contains binary serialized protobuf. When stored with EnableJSON,
+// the Store derives a JSON representation and stores it in the jsontext column
+// for efficient searching via json_extract().
 message CollectionRecord {
   string id = 1;  // Primary key
-  bytes proto_data = 2;  // Serialized protobuf
+  bytes proto_data = 2;  // Serialized protobuf (binary)
   string data_uri = 3;  // Optional reference to CollectionData/Dir
   Metadata metadata = 4;
+}
+
+// BackupPolicy defines retention rules for automatic backup management.
+// When enabled, old backups are automatically deleted after each new backup.
+//
+// Retention Rules (applied in order):
+//   1. Age-based: Delete backups older than retention_seconds
+//   2. Count-based: Keep only the max_backups newest backups
+//
+// Example: Keep last 7 daily backups for up to 30 days
+//   BackupPolicy{max_backups: 7, retention_seconds: 2592000, enabled: true}
+//
+// Safety: Cleanup runs asynchronously and is opt-in (enabled must be true)
+message BackupPolicy {
+  int32 max_backups = 1;          // Maximum number of backups to retain (0 = unlimited)
+  int64 retention_seconds = 2;    // Delete backups older than this (0 = unlimited)
+  bool enabled = 3;               // Enable automatic cleanup (false = manual only)
 }
 
 // The Collection itself: table (inode) + optional filesystem
@@ -43,9 +61,14 @@ message Collection {
   string name = 2;
   MessageTypeRef message_type = 3;
   repeated string indexed_fields = 4;
-  
+
   // Optional: if this Collection is served by a separate CollectionServer
   string server_endpoint = 5;
-  
+
   Metadata metadata = 6;
+
+  // Optional: Automatic backup retention policy
+  // When set and enabled=true, old backups are automatically cleaned up
+  // after each new backup based on age and count rules.
+  BackupPolicy backup_policy = 7;
 }

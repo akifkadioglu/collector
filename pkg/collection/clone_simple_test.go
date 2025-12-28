@@ -90,7 +90,8 @@ func TestCloneManager_ValidateRequest(t *testing.T) {
 
 	// Create a mock repo
 	mockRepo := &mockCollectionRepo{}
-	cloneManager := NewCloneManager(mockRepo, tempDir)
+	pathConfig := NewPathConfig(tempDir)
+	cloneManager := NewCloneManager(mockRepo, pathConfig)
 
 	ctx := context.Background()
 
@@ -160,6 +161,13 @@ func (m *mockCollectionRepo) CreateCollection(ctx context.Context, collection *p
 	return &pb.CreateCollectionResponse{
 		Status:       &pb.Status{Code: pb.Status_OK},
 		CollectionId: collection.Namespace + "/" + collection.Name,
+	}, nil
+}
+
+func (m *mockCollectionRepo) DeleteCollection(ctx context.Context, req *pb.DeleteCollectionRequest) (*pb.DeleteCollectionResponse, error) {
+	return &pb.DeleteCollectionResponse{
+		Status:     &pb.Status{Code: pb.Status_OK},
+		BytesFreed: 1024,
 	}, nil
 }
 

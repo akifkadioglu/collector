@@ -146,14 +146,14 @@ Services communicate via **gRPC loopback** even when co-located:
 **Capabilities:**
 - CRUD operations (Create, Get, Update, Delete, List)
 - Full-text search (SQLite FTS5)
-- JSONB filtering for complex queries
+- JSON filtering for complex queries
 - File attachments (hierarchical file storage)
 - Custom RPC handlers
 - Batch operations
 
 **Key RPCs:**
 - `Create` / `Get` / `Update` / `Delete` / `List` - CRUD
-- `Search` - Full-text + JSONB queries
+- `Search` - Full-text + JSON queries
 - `Invoke` - Custom method execution
 - `Batch` - Multi-operation transactions
 
@@ -192,6 +192,7 @@ Services communicate via **gRPC loopback** even when co-located:
 
 **Key RPCs:**
 - `CreateCollection` - Create new collection
+- **🆕 `DeleteCollection`** - Delete collection and all data
 - `Discover` - Find collections
 - `Route` - Get collection endpoint
 - `SearchCollections` - Cross-collection search
@@ -205,6 +206,59 @@ Services communicate via **gRPC loopback** even when co-located:
 - [pkg/collection/README.md](pkg/collection/README.md#collectionrepo---multi-collection-management)
 - **🆕 [Backup API Guide](docs/features/backup-api.md)** - Complete backup documentation
 - **🆕 [Clone & Fetch Guide](docs/features/clone-and-fetch.md)** - Replication and migration
+
+## Using Collector as a Library
+
+Collector can be easily embedded in your own Go applications. Instead of copying boilerplate code from `main.go`, use the `pkg/server` package:
+
+```go
+package main
+
+import (
+    "log"
+    "github.com/accretional/collector/pkg/server"
+)
+
+func main() {
+    // Create and start the Collector server
+    srv, err := server.New(server.Config{
+        DataDir:   "./my-app-data",
+        Port:      8080,
+        Namespace: "my-app",
+        // CollectorID auto-generates a UUID7 if not specified
+    })
+    if err != nil {
+        log.Fatalf("Failed to create server: %v", err)
+    }
+    defer srv.Close()
+
+    // Server is now running with all services available:
+    // - CollectorRegistry
+    // - CollectionService
+    // - CollectiveDispatcher
+    // - CollectionRepo
+
+    // Your application logic here...
+    // Connect to srv.Address() to use the services
+
+    // Wait for shutdown signal (Ctrl+C)
+    srv.WaitForShutdown()
+}
+```
+
+**Configuration Options:**
+- `DataDir` - Root directory for all data storage (default: `"./data"`)
+- `Port` - gRPC server port (default: `50051`)
+- `Namespace` - Default namespace for this collector (default: `"shared"`)
+- `CollectorID` - Unique identifier for this collector (default: random UUID7)
+- `Logger` - Custom logger (default: `log.Default()`)
+
+**Reserved Namespaces:**
+- `repo`, `backups`, `files` - Reserved (conflict with filesystem paths)
+- `system` - Used for internal collections (types, collections, connections, audit, logs) but not blocked
+- Use your own namespace for application data (e.g., `"my-app"`, `"shared"`, `"production"`)
+
+**See also:** [examples/embedded/main.go](examples/embedded/main.go) for a complete example.
 
 ## Quick Start
 
@@ -252,7 +306,7 @@ import (
 
 func main() {
     // Connect to collector
-    conn, _ := grpc.Dial("localhost:50051", grpc.WithInsecure())
+    conn, _ := grpc.NewClient("localhost:50051", grpc.WithTransportCredentials(insecure.NewCredentials()))
     defer conn.Close()
 
     ctx := context.Background()
@@ -261,9 +315,12 @@ func main() {
     repoClient := pb.NewCollectionRepoClient(conn)
     createResp, _ := repoClient.CreateCollection(ctx, &pb.CreateCollectionRequest{
         Collection: &pb.Collection{
-            Namespace:   "production",
-            Name:        "users",
-            MessageType: "collector.User",
+            Namespace: "production",
+            Name:      "users",
+            MessageType: &pb.MessageTypeRef{
+                Namespace:   "myapp",
+                MessageName: "User",
+            },
         },
     })
 
@@ -285,9 +342,11 @@ func main() {
     // 4. Connect to another collector
     dispatcherClient := pb.NewCollectiveDispatcherClient(conn)
     connectResp, _ := dispatcherClient.Connect(ctx, &pb.ConnectRequest{
-        CollectorId: "collector-001",
-        Address:     "localhost:50051",
-        Namespaces:  []string{"production"},
+        Address:    "localhost:50052",
+        Namespaces: []string{"production"},
+        Metadata: map[string]string{
+            "collector_id": "collector-001",
+        },
     })
 
     // 5. Dispatch a request (routes automatically)
@@ -360,7 +419,7 @@ results, _ := client.Search(ctx, &pb.SearchRequest{
     Limit:      20,
 })
 
-// Combined with JSONB filtering
+// Combined with JSON filtering
 results, _ := client.Search(ctx, &pb.SearchRequest{
     Collection: &pb.Collection{Namespace: "production", Name: "users"},
     Query:      "engineer",
@@ -393,19 +452,33 @@ fmt.Printf("Executed by: %s\n", resp.HandledByCollectorId)
 
 ### Backup and Replication 🆕
 
-**Point-in-time backups** without collection metadata pollution:
+**Point-in-time backups** with automatic retention management:
 
 ```go
-// Create backup
+// Step 1: Create collection with retention policy (one-time setup)
+_, _ = repoClient.CreateCollection(ctx, &pb.CreateCollectionRequest{
+    Collection: &pb.Collection{
+        Namespace:   "prod",
+        Name:        "users",
+        MessageType: &pb.MessageTypeRef{MessageName: "User"},
+        BackupPolicy: &pb.BackupPolicy{
+            MaxBackups:       7,              // Keep last 7 backups
+            RetentionSeconds: 30 * 24 * 3600, // 30 days
+            Enabled:          true,           // Enable automatic cleanup
+        },
+    },
+})
+
+// Step 2: Create backup (path is auto-generated)
 backupResp, _ := client.BackupCollection(ctx, &pb.BackupCollectionRequest{
     Collection: &pb.NamespacedName{
         Namespace: "prod",
         Name:      "users",
     },
-    DestPath:     "/backups/users-2025-11-22.db",
     IncludeFiles: true,
-    Metadata:     map[string]string{"retention": "30d"},
+    Metadata:     map[string]string{"type": "daily"},
 })
+// Old backups are automatically deleted based on retention policy!
 
 // List backups
 listResp, _ := client.ListBackups(ctx, &pb.ListBackupsRequest{
@@ -475,7 +548,7 @@ Collections are like database tables for protobuf messages:
 
 ```
 Collection: production/users
-  ├─ Store: SQLite with JSONB + FTS5
+  ├─ Store: SQLite with JSON + FTS5
   │   ├─ user-123: {name: "Alice", email: "alice@example.com"}
   │   ├─ user-456: {name: "Bob", email: "bob@example.com"}
   │   └─ ...

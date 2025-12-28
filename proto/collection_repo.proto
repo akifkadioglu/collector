@@ -25,6 +25,15 @@ message CreateCollectionResponse {
   string server_endpoint = 3;
 }
 
+message DeleteCollectionRequest {
+  NamespacedName collection = 1;
+}
+
+message DeleteCollectionResponse {
+  Status status = 1;
+  int64 bytes_freed = 2;  // Total bytes freed (DB + files)
+}
+
 message DiscoverRequest {
   string namespace = 1;  // Empty for all
   map<string, string> label_filter = 2;
@@ -171,11 +180,16 @@ message BackupMetadata {
   map<string, string> metadata = 10; // Additional metadata (tags, notes)
 }
 
+// Request to create a point-in-time backup of a collection.
+// Backups are stored automatically at:
+//   {DataDir}/.backup/{namespace}/{collectionname}-{timestampseconds}.db
+//
+// Automatic Cleanup: If the collection has a BackupPolicy configured with
+// enabled=true, old backups are automatically deleted based on retention rules.
 message BackupCollectionRequest {
   NamespacedName collection = 1;
-  string dest_path = 2;           // Local file path or URI (s3://, gcs://)
   bool include_files = 3;         // Include filesystem data
-  map<string, string> metadata = 4; // Optional metadata (tags, notes, retention policy)
+  map<string, string> metadata = 4; // Optional metadata (tags, notes)
 }
 
 message BackupCollectionResponse {
@@ -233,6 +247,7 @@ message VerifyBackupResponse {
 
 service CollectionRepo {
   rpc CreateCollection(CreateCollectionRequest) returns (CreateCollectionResponse);
+  rpc DeleteCollection(DeleteCollectionRequest) returns (DeleteCollectionResponse);
   rpc Discover(DiscoverRequest) returns (DiscoverResponse);
   rpc Route(RouteRequest) returns (RouteResponse);
   rpc SearchCollections(SearchCollectionsRequest) returns (SearchCollectionsResponse);

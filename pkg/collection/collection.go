@@ -9,15 +9,36 @@ import (
 	"google.golang.org/protobuf/types/known/timestamppb"
 )
 
+// MaxProtoSize is the maximum size in bytes for proto data stored in any collection.
+// This global limit prevents DoS attacks via oversized proto data.
+const MaxProtoSize = 10 * 1024 * 1024 // 10MB
+
 // Collection is the domain entity handling logic.
 type Collection struct {
-	Meta  *pb.Collection
-	Store Store
-	FS    FileSystem
+	Meta          *pb.Collection
+	Store         Store
+	FS            FileSystem
+	bootstrapMode bool // Skip validation during system bootstrap
+}
+
+// CollectionOption is a functional option for Collection construction
+type CollectionOption func(*Collection) error
+
+// WithBootstrap allows skipping validation during bootstrap
+func WithBootstrap(bootstrap bool) CollectionOption {
+	return func(c *Collection) error {
+		c.bootstrapMode = bootstrap
+		return nil
+	}
 }
 
 // NewCollection initializes a Collection.
 func NewCollection(meta *pb.Collection, store Store, fs FileSystem) (*Collection, error) {
+	return NewCollectionWithOptions(meta, store, fs)
+}
+
+// NewCollectionWithOptions initializes a Collection with functional options.
+func NewCollectionWithOptions(meta *pb.Collection, store Store, fs FileSystem, opts ...CollectionOption) (*Collection, error) {
 	if meta.Namespace == "" || meta.Name == "" {
 		return nil, fmt.Errorf("namespace and name are required")
 	}
@@ -30,11 +51,20 @@ func NewCollection(meta *pb.Collection, store Store, fs FileSystem) (*Collection
 		}
 	}
 
-	return &Collection{
+	coll := &Collection{
 		Meta:  meta,
 		Store: store,
 		FS:    fs,
-	}, nil
+	}
+
+	// Apply options
+	for _, opt := range opts {
+		if err := opt(coll); err != nil {
+			return nil, fmt.Errorf("apply option: %w", err)
+		}
+	}
+
+	return coll, nil
 }
 
 // --- Store Delegates ---
@@ -43,6 +73,12 @@ func (c *Collection) CreateRecord(ctx context.Context, record *pb.CollectionReco
 	if record.Id == "" {
 		return fmt.Errorf("record id required")
 	}
+
+	// Validate proto data size (global limit to prevent DoS)
+	if len(record.ProtoData) > MaxProtoSize {
+		return fmt.Errorf("proto data size (%d bytes) exceeds maximum allowed size (%d bytes)", len(record.ProtoData), MaxProtoSize)
+	}
+
 	// Ensure metadata exists
 	if record.Metadata == nil {
 		record.Metadata = &pb.Metadata{}
@@ -65,6 +101,11 @@ func (c *Collection) GetRecord(ctx context.Context, id string) (*pb.CollectionRe
 func (c *Collection) UpdateRecord(ctx context.Context, record *pb.CollectionRecord) error {
 	if record.Id == "" {
 		return fmt.Errorf("record id required")
+	}
+
+	// Validate proto data size (global limit to prevent DoS)
+	if len(record.ProtoData) > MaxProtoSize {
+		return fmt.Errorf("proto data size (%d bytes) exceeds maximum allowed size (%d bytes)", len(record.ProtoData), MaxProtoSize)
 	}
 
 	// Ensure metadata exists
