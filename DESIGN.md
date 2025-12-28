@@ -1,47 +1,82 @@
 # Collector Design v0.1
 
-Collector is a general system for agentic computing, consising of multiple "tiered" abstractions that build on each other from a searchable data store (a Collection) up to a stateful, multi-tenant "agent mesh".
+**Collector** is a general system for agentic computing, consisting of multiple "tiered" abstractions that build on each other—from a searchable data store (a Collection) up to a stateful, multi-tenant "agent mesh."
 
-# Foreword
+---
 
-Collector is a project I've been ruminating about over the past several years. Here's what I want to accomplish:
+## 1. Foreword & Technical Goals
 
-* A hierarchical registry of identity/auth "namespaces" or tenancy units. Something that allows for nested multitenancy, deep and flexible "scoping" of permissions from the root tenancy unit all the way down through intermediate tenancy units to leaves.
-* A "unix-like" universal API for *structured* data.
+Collector addresses a problem I've been ruminating about over the past several years: what technical infrastructure would best allow AI agents to operate autonomously at scale? I think it needs a very particular architecture:
+
+### Identity & Hierarchy
+
+* A **hierarchical registry** of identity/auth "namespaces" or tenancy units.
+* Nested multitenancy with deep and flexible "scoping" of permissions from the root tenancy unit down to leaf nodes.
+* Identity, authn, and authz should "just work."
+
+### Data Topology & Structure
+
+* A **"Unix-like" universal API** for *structured*, *semantic* data.
 * A hierarchical registry of APIs and data structures.
-* A hierarchical index of actual data, API providers, API implementations, tenancy units, etc. in a multitenant distributed computing environment.
-* A 9P-like "everything is a file" data topology, ie an almost completely uniform interface for accessing local data via filesystem, or remote data via the network. Ideally, as close to an "isomorphism" between the data exposed by the network and filesystem as possible.
-* A distributed system "microkernel" that implements core control plane, data plane, and "config"/platform/system-leel functionality in one compact service. Something that can serve as the basis for a mesh network.
-* Every "dataset" comes with all the usual CRUD APIs, plus search
-* Every entity within the system is discoverable and introspectable (the whole thing uses reflection)
-* Every data type can be mutated/processed via dynamically registered, persistent functions
-* No compromises or leaky abstractions between "ephemeral, fungible, dynamically provisioned" and "persistent, irreplaceable, declaratively provisioned"
-* Identity, authn, and authz should "just work"
-* Compute, disk, network resources under normal workloads should be serverless/dynamically provisioned without the need for tuning.
+* A **9P-like "everything is a file"** data topology. This implies a uniform interface for accessing local data via filesystem or remote data via network (isomorphism).
+* Every "dataset" comes with all standard **CRUD APIs, plus search**.
 
-## Agent Mesh
+### System Architecture
 
-These goals are mostly constraints inspired by the ways existing distributed systems, mesh networks, and operating systems fail to provide  AI agents with the right structure for truly autonomous work at scale. Here's their "user story":
+* A distributed system **"microkernel"** implementing core control plane, data plane, and config functionality in one compact service.
+* A hierarchical index of actual data, API providers, and tenancy units in a multitenant distributed environment.
+* **Introspection:** Every entity within the system is discoverable and uses reflection.
+* **Dynamic Mutation:** Every data type can be mutated/processed via dynamically registered, persistent functions.
 
-Agents should be able to be "dropped into" a compute environment knowing only a small set of core APIs, capable of writing programs that serialize/deserialize/process well-defined data structures according to well-defined funtion interfaces, and possessing enough memory or "working state" to craft and execute non-trivial plans or goals, and understand their environment + drive the execution of their goals at massive computational scale, in coordination with others over a network.
+### Resource Management
 
-## New Kind of Distributed System
+* No compromises or leaky abstractions between "ephemeral, fungible, dynamically provisioned" resources and "persistent, irreplaceable" ones.
+* Compute, disk, and network resources under normal workloads should be **serverless/dynamically provisioned** without the need for manual tuning.
 
-Understandably, existing systems fail to deliver these characteristics. Resource provisioning, api integration, novel dataset creation/processing/sharing, and tenancy units are typically treated as immutable at runtime unless a privileged operator or developer is performing some kind of exceptional operation or intervention. Humans provision and configure these and then go do other things, *preferring* friction and out-of-band configuration to ensure that changes only occur under direct, intentional human supervision, because these kinds of changes typically involve some kind of cost or security implication.
+---
 
-Now that LLMs are capable of writing, calling, and interacting with computers at the API-level, we need something more flexible. A human might could want to set guardrails, or budgets, or limits, or allow/disallow specific actions. But they might want their "agents" to be able to provision resources, or autonomously coordinate and collaborate without direct orchestration.
+## 2. The Agent Mesh
 
-Service meshes are the closest systems we have to this right now, but they're not built for this kind of use case. Although these agents might be entrusted with non-trivial spending and infrastructure decisions, the specific resources and data they might use to accomplish their goals could be completely ephemeral/dynamic and not useful outside the scope of their task. Or, perhaps they generate quite a lot of useful, important data that their human orchestrators would like to keep - but too much for the human to easily review or process themselves without the LLMs' help in organizing and navigating it. Most service meshes are designed around IAC and stateful control planes where identities and services are long-lived, even if their particular instances aren't.
+These requirements are inspired by the ways existing distributed systems fail to provide AI agents with the right structure for autonomous work.
 
-Also, it's rare for existing distributed systems to account for compute resources that are both *stateful and ephemeral*, but potentially also long-lived, existing on a longevity spectrum that may not be well understand ahead of time. But that's what agents need.
+**The User Story:**
 
-## Fully Semantic Computing
+> Agents should be able to be "dropped into" a compute environment knowing only a small set of core APIs, capable of writing programs that serialize/deserialize/process well-defined data structures according to well-defined function interfaces.
+> They should possess enough memory or "working state" to craft and execute non-trivial plans, fully understand their environment, and drive the execution of goals at massive computational scale in coordination with others.
 
-That brings me to the last goal of Collector. LLM "agents" are essentially computers capable of understanding and extending themselves, but unlike LISP or LEAN, they do it with shared semantics to humans' natural languages. So, some might worry that computing via agents risks humans losing insight into what their computers are actually doing.
+Despite the scope of the problem, we also need to keep things simple! **The project's technical requirements are constraints, not features.**  This is perhaps the most important and challenging part of the project.
 
-We can reframe that: computing through highly capable agents would become, from the humans' perspective, fully semantic. Why? For an agent to "know thyself" and "actualize" some semantic human request, even if it requires coordinating with other agents or modifying its own environment, there has to be some stable mapping of the human requests' semantics to the environment and agents' shared semantics.
+---
 
-So as agents accomplish tasks that humans have not quite fully automated or solved (which they would have to discover by searching/finding something matching the human client's semantics), they will effectively need to make their shared computing environment *more semantic*, and importantly, *more closely match human semantics* to aid in discoverability and legibility. This is something humans have been doing with domains, products, names for abstractions and tools, jargon and vocabulary. But now tool-creating agents can automate this, and for maximum results we ought to make these new semantics as universally legible as possible.
+## 3. A New Kind of Distributed System
 
-Every namespace, type, or service that's given a new discoverable/legible name can actually result in computers more closely matching human semantics. That's what collector can be: a way to make computing completely semantic, and **more human**, with the help of our robot friends.
+Existing systems (like K8s or Service Meshes) understandably fail to deliver the right properties for agents because they treat resource provisioning, API integration, and tenancy units as **immutable at runtime**.
 
+* **Eliminating Friction** Humans typically prefer friction and out-of-band configuration to ensure certain changes only occur under direct manual supervision, as these changes involve cost or security implications.
+* **Flexible Guardrails:** LLMs capable of writing and calling APIs need flexibility. While humans set guardrails (budgets, allow/disallow lists), agents need to provision resources and coordinate autonomously without direct orchestration.
+
+Although agents may make non-trivial infrastructure decisions, the resources they use might be completely ephemeral. Alternatively, they may generate massive amounts of useful data that humans want to keep but cannot easily organize themselves. Perhaps they can accomplish their task by finding and using existing data, producing nothing worth keeping; or perhaps the intermediate data or tools they use to accomplish a task is so valuable that it should be backed up, replicated, and widely broadcast to other agents. Existing distributed systems don't model statefulness, longevity, and fungibility as a spectrum like this.
+
+---
+
+## 4. Fully Semantic Computing
+
+LLM agents are computers that can understand and extend themselves using semantics shared with human natural language. Some worry this means losing visibility into what computers are doing.
+
+**I believe the opposite is true.**
+
+### Agents Make Computing More Human-Legible
+Let's reframe the problem: Computing through highly capable agents becomes, from the human perspective, **fully semantic**.
+
+For an agent to "know thyself" and fulfill the semantics of a particular human request, there must be a stable mapping between the request's semantics, the agent's internal semantics, and the environment's semantics (APIs, data, tools). As agents accomplish tasks humans haven't fully automated, they will need to make their shared computing environment *more semantic* to aid discoverability.
+
+So as agents solve previously-unautomated problems, they:
+
+* Search for functionality matching human semantic requests
+* Create new capabilities when none exist
+* Make these discoverable for future agents
+* Use names and structures that match human understanding for maximum discoverability
+
+This mirrors how humans create domain-specific languages, product names, abstractions and tools, and professional jargon and vocabulary. But, agents can automate even this. The semantics stay universally legible because human-agent communication and agent-agent communication need to maintain shared semantics, just like human-human communication does already.
+
+Every namespace, type, or service given a discoverable, legible name then results in computers **more closely** matching human semantics. That's why I think Collector is a way to make computing completely semantic and **more human**, with the help of our robot friends.
